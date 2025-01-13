@@ -1703,7 +1703,7 @@ let sprint_exprs' chan exprs =
 
 
 
-(*final assignmet starts here *)
+(*final project starts here *)
 
 let file_to_string input_file =
   let in_channel = open_in input_file in
@@ -1831,9 +1831,29 @@ module Code_Generation (* : CODE_GENERATION *) = struct
       ("return", "L_code_ptr_return");
     ];;  
 
+  (*change 1*)
   let collect_constants =
     let rec run = function
-      | _ -> raise (X_not_yet_implemented "final project")
+      | ScmConst'(sexpr) -> [sexpr]
+      | ScmVarGet' _ -> []
+      | ScmVarSet'(_, rhs)
+      | ScmVarDef'(_, rhs)
+      | ScmBoxSet'(_, rhs) ->
+          run rhs
+      
+      | ScmIf'(test, dit, dif) ->
+          (run test) @ (run dit) @ (run dif)
+      
+      | ScmSeq' exprs
+      | ScmOr' exprs ->
+          List.flatten (List.map run exprs)
+      
+      | ScmApplic'(proc, args, _) ->
+          (run proc) @
+          (List.flatten (List.map run args))
+      
+      | ScmLambda'(_params, _kind, body) ->
+          run body
     and runs exprs' =
       List.fold_left (fun consts expr' -> consts @ (run expr')) [] exprs'
     in
@@ -1977,9 +1997,35 @@ module Code_Generation (* : CODE_GENERATION *) = struct
     Printf.sprintf "%s:\n%s"
       label_start_of_constants_table (run table);;
 
+  (*change 2*)
   let collect_free_vars =
     let rec run = function
-      | _ -> raise (X_not_yet_implemented "final project")
+      | ScmVarGet'(Var'(v, Free)) ->
+          [v]
+      | ScmVarSet'(Var'(v, Free), rhs) ->
+          v :: run rhs
+      | ScmVarDef'(Var'(v, Free), rhs) ->
+          v :: run rhs
+      
+      | ScmIf'(test, dit, dif) ->
+          run test @ run dit @ run dif
+      
+      | ScmSeq'(exprs)
+      | ScmOr'(exprs) ->
+          List.flatten (List.map run exprs)
+      
+      | ScmApplic'(proc, args, _) ->
+          run proc @ List.flatten (List.map run args)
+      
+      | ScmLambda'(_params, _kind, body) ->
+          run body
+      
+      | ScmBoxSet'(_var, rhs) ->
+          run rhs
+      
+      (* If it's anything else (Param, Bound, or a type of node that doesn't
+        introduce new free vars), we return []: *)
+      | _ -> []
     and runs exprs' =
       List.fold_left
         (fun vars expr' -> vars @ (run expr'))
@@ -2122,8 +2168,25 @@ module Code_Generation (* : CODE_GENERATION *) = struct
       | ScmSeq' exprs' ->
          String.concat "\n"
            (List.map (run params env) exprs')
-      | ScmOr' exprs' ->
-         raise (X_not_yet_implemented "final project")
+      | ScmOr' exprs' -> (*3a*)
+        let label_end = make_or_end () in
+        (match exprs' with
+        | [] ->
+            (* An empty OR is uncommon, but let's default to #f: *)
+            "\tmov rax, sob_boolean_false\n"
+        | _ ->
+            let rec loop = function
+              | [] -> ""  (* won't happen if exprs' is not empty *)
+              | [last] ->
+                  (run params env last)
+              | hd :: tl ->
+                  (run params env hd)
+                  ^ "\tcmp rax, sob_boolean_false\n"
+                  ^ (Printf.sprintf "\tjne %s\n" label_end)
+                  ^ loop tl
+            in
+            let code = loop exprs' in
+            code ^ (Printf.sprintf "%s:\n" label_end))
       | ScmVarSet' (Var' (v, Free), expr') ->
          raise (X_not_yet_implemented "final project")
       | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
