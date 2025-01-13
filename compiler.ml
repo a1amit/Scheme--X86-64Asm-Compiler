@@ -2187,10 +2187,17 @@ module Code_Generation (* : CODE_GENERATION *) = struct
             in
             let code = loop exprs' in
             code ^ (Printf.sprintf "%s:\n" label_end))
-      | ScmVarSet' (Var' (v, Free), expr') ->
-         raise (X_not_yet_implemented "final project")
-      | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
-         raise (X_not_yet_implemented "final project")
+      | ScmVarSet' (Var' (v, Free), expr') -> (*3b*)
+          let code_expr = run params env expr' in
+          let label = search_free_var_table v free_vars in
+          code_expr
+          ^ Printf.sprintf "\tmov qword [%s], rax\n" label
+          ^ "\tmov rax, sob_void\n"
+      | ScmVarSet'(Var'(v, Param minor), expr') -> (*3c*)
+          let code_expr = run params env expr' in
+          code_expr
+          ^ (Printf.sprintf "\tmov qword [rbp + 8*(4 + %d)], rax\n" minor)
+          ^ "\tmov rax, sob_void\n"
       | ScmVarSet' (Var' (v, Param minor), expr') ->
          raise (X_not_yet_implemented "final project")
       | ScmVarSet' (Var' (v, Bound (major, minor)), expr') ->
