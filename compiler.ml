@@ -2193,15 +2193,22 @@ module Code_Generation (* : CODE_GENERATION *) = struct
           code_expr
           ^ Printf.sprintf "\tmov qword [%s], rax\n" label
           ^ "\tmov rax, sob_void\n"
+      | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
+         raise (X_not_yet_implemented "final project")
       | ScmVarSet'(Var'(v, Param minor), expr') -> (*3c*)
-          let code_expr = run params env expr' in
-          code_expr
-          ^ (Printf.sprintf "\tmov qword [rbp + 8*(4 + %d)], rax\n" minor)
-          ^ "\tmov rax, sob_void\n"
-      | ScmVarSet' (Var' (v, Param minor), expr') ->
-         raise (X_not_yet_implemented "final project")
-      | ScmVarSet' (Var' (v, Bound (major, minor)), expr') ->
-         raise (X_not_yet_implemented "final project")
+        let code_expr = run params env expr' in
+        code_expr
+        ^ (Printf.sprintf "\tmov qword [rbp + 8*(4 + %d)], rax\n" minor)
+        ^ "\tmov rax, sob_void\n"
+      
+      | ScmVarSet'(Var'(v, Bound(major, minor)), expr') -> (*3d*)
+        let code_expr = run params env expr' in
+        code_expr
+        ^ "\tmov rbx, ENV\n"
+        ^ (Printf.sprintf "\tmov rbx, qword [rbx + 8*%d]\n" major)
+        ^ (Printf.sprintf "\tmov qword [rbx + 8*%d], rax\n" minor)
+        ^ "\tmov rax, sob_void\n"
+      
       | ScmVarDef' (Var' (v, Free), expr') ->
          let label = search_free_var_table v free_vars in
          (run params env expr')
@@ -2215,8 +2222,17 @@ module Code_Generation (* : CODE_GENERATION *) = struct
       | ScmBoxGet' var' ->
          (run params env (ScmVarGet' var'))
          ^ "\tmov rax, qword [rax]\n"
-      | ScmBoxSet' (var', expr') ->
-         raise (X_not_yet_implemented "final project")
+      | ScmBoxSet' (var', expr') -> (*3e*)
+         (* We'll get the box pointer in rbx: *)
+          let code_var = run params env (ScmVarGet' var') in
+          let code_expr = run params env expr' in
+          code_var
+          ^ "\t; now box pointer is in rax. Store it in rbx\n"
+          ^ "\tmov rbx, rax\n"
+          ^ code_expr
+          ^ "\t; now the new value is in rax, store it in [rbx]\n"
+          ^ "\tmov [rbx], rax\n"
+          ^ "\tmov rax, sob_void\n"
       | ScmLambda' (params', Simple, body) ->
          let label_loop_env = make_lambda_simple_loop_env ()
          and label_loop_env_end = make_lambda_simple_loop_env_end ()
