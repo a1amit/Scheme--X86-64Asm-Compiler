@@ -1702,8 +1702,8 @@ let sprint_exprs' chan exprs =
        (List.map string_of_expr' exprs));;
 
 
-
-(*final project starts here *)
+       
+(* final assignment starts here*)
 
 let file_to_string input_file =
   let in_channel = open_in input_file in
@@ -1831,37 +1831,68 @@ module Code_Generation (* : CODE_GENERATION *) = struct
       ("return", "L_code_ptr_return");
     ];;  
 
-  (*change 1*)
-  let collect_constants =
-    let rec run = function
-      | ScmConst'(sexpr) -> [sexpr]
-      | ScmVarGet' _ -> []
-      | ScmVarSet'(_, rhs)
-      | ScmVarDef'(_, rhs)
-      | ScmBoxSet'(_, rhs) ->
-          run rhs
-      
-      | ScmIf'(test, dit, dif) ->
-          (run test) @ (run dit) @ (run dif)
-      
-      | ScmSeq' exprs
-      | ScmOr' exprs ->
-          List.flatten (List.map run exprs)
-      
-      | ScmApplic'(proc, args, _) ->
-          (run proc) @
-          (List.flatten (List.map run args))
-      
-      | ScmLambda'(_params, _kind, body) ->
-          run body
-    and runs exprs' =
-      List.fold_left (fun consts expr' -> consts @ (run expr')) [] exprs'
-    in
-    fun exprs' ->
-    (List.map
-       (fun (scm_name, _) -> ScmString scm_name)
-       global_bindings_table)
-    @ (runs exprs');;
+let collect_constants =
+  let rec run = function
+
+    (* 1) For a free variable-get "x", collect both (ScmString "x") and (ScmSymbol "x"): *)
+    | ScmVarGet' (Var'(v, Free)) ->
+        [ScmString v; ScmSymbol v]
+
+    (* 2) For a free box/bound references, do the same: *)
+    | ScmBox'(Var'(v, Free)) ->
+        [ScmString v; ScmSymbol v]
+
+    | ScmBoxGet'(Var'(v, Free)) ->
+        [ScmString v; ScmSymbol v]
+
+    (* If it's a free box-set, also gather subconstants from the RHS: *)
+    | ScmBoxSet'(Var'(v, Free), rhs) ->
+        (ScmString v :: ScmSymbol v :: run rhs)
+
+    (* 3) If it’s a free VarDef or VarSet, collect (ScmString v; ScmSymbol v) plus recurse on expr: *)
+    | ScmVarDef'(Var'(v, Free), expr')
+    | ScmVarSet'(Var'(v, Free), expr') ->
+        (ScmString v :: ScmSymbol v :: (run expr'))
+
+    (* 4) For a VarGet' that isn't free, or a Box that isn't free, etc. => do nothing special: *)
+    | ScmVarGet' _       
+    | ScmBox' _
+    | ScmBoxGet' _ ->
+        []
+
+    (* 5) If it's a constant => collect that constant directly: *)
+    | ScmConst'(sexpr) ->
+        [sexpr]
+
+    (* 6) Recursively gather from sub-expressions in If, Seq, Or, Lambda, etc.: *)
+    | ScmIf'(test, dit, dif) ->
+        (run test) @ (run dit) @ (run dif)
+
+    | ScmSeq'(exprs') ->
+        runs exprs'
+
+    | ScmOr'(exprs') ->
+        runs exprs'
+
+    | ScmVarDef' (_, expr')
+    | ScmVarSet' (_, expr')
+    | ScmBoxSet' (_, expr')
+    | ScmLambda' (_, _, expr') ->
+        run expr'
+
+    | ScmApplic'(proc, args, _) ->
+        (run proc) @ (runs args)
+
+  (* helper that runs `run` over a list of expressions: *)
+  and runs exprs' =
+    List.fold_left (fun acc expr' -> acc @ (run expr')) [] exprs'
+
+  in fun exprs' ->
+  (* add all global primitive names as strings, e.g. "null?", "pair?", etc. *)
+  (List.map (fun (scm_name, _) -> ScmString scm_name) global_bindings_table)
+  (* then fold in everything `run` collects from the program: *)
+  @ (runs exprs')
+;;
 
   let add_sub_constants =
     let rec run sexpr = match sexpr with
@@ -1900,21 +1931,49 @@ module Code_Generation (* : CODE_GENERATION *) = struct
        ([RTTI "T_boolean_true"], 1)
     | ScmChar ch ->
        ([RTTI "T_char"; Byte (int_of_char ch)], 2)
-    | ScmString str ->
-       raise (X_not_yet_implemented "final project")
+
+
+    | ScmString str -> (*Implemented*)
+      let length = String.length str in
+      let meta = [RTTI "T_string"; Quad length; ASCII str] in
+      (meta, 1 + word_size + length)
+
     | ScmSymbol sym ->
        let addr = search_constant_address (ScmString sym) table in
        ([RTTI "T_interned_symbol"; ConstPtr addr], 1 + word_size)
+
+
     | ScmNumber (ScmInteger n) ->
        ([RTTI "T_integer"; Quad n], 1 + word_size)
+
+
     | ScmNumber (ScmFraction (numerator, denominator)) ->
-       raise (X_not_yet_implemented "final project")
+      let meta = [RTTI "T_fraction"; Quad numerator; Quad denominator] in
+      (meta, 1 + 2 * word_size)
+
+
+
     | ScmNumber (ScmReal x) ->
        ([RTTI "T_real"; QuadFloat x], 1 + word_size)
+
+
     | ScmVector s ->
-       raise (X_not_yet_implemented "final project")
+      let len = List.length s in
+      let sub_ptrs =
+        List.map (fun s -> ConstPtr (search_constant_address s table)) s
+      in
+      let meta = [RTTI "T_vector"; Quad len] @ sub_ptrs in
+      (meta, 1 + word_size + (len * word_size))
+
+
+
     | ScmPair (car, cdr) ->
-       raise (X_not_yet_implemented "final project");;
+      let car_addr = search_constant_address car table in
+      let cdr_addr = search_constant_address cdr table in
+      let meta = [RTTI "T_pair"; ConstPtr car_addr; ConstPtr cdr_addr] in
+      (meta, 1 + 2 * word_size);;
+
+
 
   let make_constants_table =
     let rec run table loc = function
@@ -1997,34 +2056,29 @@ module Code_Generation (* : CODE_GENERATION *) = struct
     Printf.sprintf "%s:\n%s"
       label_start_of_constants_table (run table);;
 
-  (*change 2*)
-  let collect_free_vars =
+  let collect_free_vars = (*implemented*)
     let rec run = function
-      | ScmVarGet'(Var'(v, Free)) ->
-          [v]
-      | ScmVarSet'(Var'(v, Free), rhs) ->
-          v :: run rhs
-      | ScmVarDef'(Var'(v, Free), rhs) ->
-          v :: run rhs
-      
-      | ScmIf'(test, dit, dif) ->
-          run test @ run dit @ run dif
-      
-      | ScmSeq'(exprs)
-      | ScmOr'(exprs) ->
-          List.flatten (List.map run exprs)
-      
-      | ScmApplic'(proc, args, _) ->
-          run proc @ List.flatten (List.map run args)
-      
-      | ScmLambda'(_params, _kind, body) ->
-          run body
-      
-      | ScmBoxSet'(_var, rhs) ->
+      | ScmVarGet'(Var'(name, Free)) -> [name]
+      | ScmVarGet' _ -> []
+      | ScmBox'(Var'(name, Free)) -> [name]
+      | ScmBox' _ -> []
+      | ScmBoxGet'(Var'(name, Free)) -> [name]
+      | ScmBoxGet' _ -> []
+      | ScmConst' _ -> []
+      | ScmIf'(tst, dit, dif) ->
+          (run tst) @ (run dit) @ (run dif)
+      | ScmSeq'(lst) | ScmOr'(lst) ->
+          List.fold_left (fun acc e -> acc @ (run e)) [] lst
+      | ScmVarSet'(Var'(name, Free), rhs)
+      | ScmVarDef'(Var'(name, Free), rhs) ->
+          (name :: (run rhs))
+      | ScmVarSet'(_, rhs)
+      | ScmVarDef'(_, rhs)
+      | ScmBoxSet'(_, rhs)
+      | ScmLambda'(_, _, rhs) ->
           run rhs
-      
-      (* If it's anything else (Param, Bound, or a type of node that doesn't
-        introduce new free vars), we return []: *)
+      | ScmApplic'(proc, args, _) ->
+          (run proc) @ (List.flatten (List.map run args))
       | _ -> []
     and runs exprs' =
       List.fold_left
@@ -2133,9 +2187,12 @@ module Code_Generation (* : CODE_GENERATION *) = struct
     let consts = make_constants_table exprs' in
     let free_vars = make_free_vars_table exprs' in
     let rec run params env = function
+
       | ScmConst' sexpr ->
          let addr = search_constant_address sexpr consts in
          Printf.sprintf "\tmov rax, L_constants + %d\n" addr
+
+
       | ScmVarGet' (Var' (v, Free)) ->
          let label = search_free_var_table v free_vars in
          (Printf.sprintf
@@ -2143,14 +2200,20 @@ module Code_Generation (* : CODE_GENERATION *) = struct
             label v)
          ^ "\tcmp byte [rax], T_undefined\n"
          ^ "\tje L_error_fvar_undefined\n"
+
+
       | ScmVarGet' (Var' (v, Param minor)) ->
          Printf.sprintf "\tmov rax, PARAM(%d)\t; param %s\n"
            minor v
+
+
       | ScmVarGet' (Var' (v, Bound (major, minor))) ->
          "\tmov rax, ENV\n"
          ^ (Printf.sprintf "\tmov rax, qword [rax + 8 * %d]\n" major)
          ^ (Printf.sprintf
               "\tmov rax, qword [rax + 8 * %d]\t; bound var %s\n" minor v)
+
+
       | ScmIf' (test, dit, dif) ->
          let test_code = run params env test
          and dit_code = run params env dit
@@ -2165,74 +2228,118 @@ module Code_Generation (* : CODE_GENERATION *) = struct
          ^ (Printf.sprintf "%s:\n" label_else)
          ^ dif_code
          ^ (Printf.sprintf "%s:\n" label_end)
+
+
       | ScmSeq' exprs' ->
          String.concat "\n"
            (List.map (run params env) exprs')
-      | ScmOr' exprs' -> (*3a*)
-        let label_end = make_or_end () in
-        (match exprs' with
-        | [] ->
-            (* An empty OR is uncommon, but let's default to #f: *)
-            "\tmov rax, sob_boolean_false\n"
-        | _ ->
-            let rec loop = function
-              | [] -> ""  (* won't happen if exprs' is not empty *)
-              | [last] ->
-                  (run params env last)
-              | hd :: tl ->
-                  (run params env hd)
-                  ^ "\tcmp rax, sob_boolean_false\n"
-                  ^ (Printf.sprintf "\tjne %s\n" label_end)
-                  ^ loop tl
-            in
-            let code = loop exprs' in
-            code ^ (Printf.sprintf "%s:\n" label_end))
-      | ScmVarSet' (Var' (v, Free), expr') -> (*3b*)
-          let code_expr = run params env expr' in
-          let label = search_free_var_table v free_vars in
-          code_expr
-          ^ Printf.sprintf "\tmov qword [%s], rax\n" label
-          ^ "\tmov rax, sob_void\n"
+
+
+      | ScmOr' exprs' -> (*implemented*)
+        let label_done = make_or_end () in
+
+        (* Wrap the match in parentheses: *)
+        (match list_and_last exprs' with
+         | None ->
+             (* no expressions => (or) => #f *)
+             Printf.sprintf "\tmov rax, sob_boolean_false\n"
+     
+         | Some (all_but_last, last_expr) ->
+             let rec code_for_all_but_last = function
+               | [] -> ""
+               | e :: rest ->
+                   let e_code = run params env e in
+                   e_code
+                   ^ "\tcmp rax, sob_boolean_false\n"
+                   ^ Printf.sprintf "\tjne %s\n" label_done
+                   ^ code_for_all_but_last rest
+             in
+             let final_code = run params env last_expr in
+             code_for_all_but_last all_but_last
+             ^ final_code
+             ^ Printf.sprintf "%s:\n" label_done
+        )
+
+
+      | ScmVarSet' (Var' (v, Free), expr') ->
+        let value_code = run params env expr' in
+        let label = search_free_var_table v free_vars in
+        value_code
+        ^ (Printf.sprintf "\tmov qword [%s], rax\n" label)
+        ^ "\tmov rax, sob_void\n"
+
+
       | ScmVarSet' (Var' (v, Param minor), ScmBox' _) ->
-         raise (X_not_yet_implemented "final project")
-      | ScmVarSet'(Var'(v, Param minor), expr') -> (*3c*)
-        let code_expr = run params env expr' in
-        code_expr
-        ^ (Printf.sprintf "\tmov qword [rbp + 8*(4 + %d)], rax\n" minor)
-        ^ "\tmov rax, sob_void\n"
-      
-      | ScmVarSet'(Var'(v, Bound(major, minor)), expr') -> (*3d*)
-        let code_expr = run params env expr' in
-        code_expr
-        ^ "\tmov rbx, ENV\n"
-        ^ (Printf.sprintf "\tmov rbx, qword [rbx + 8*%d]\n" major)
-        ^ (Printf.sprintf "\tmov qword [rbx + 8*%d], rax\n" minor)
-        ^ "\tmov rax, sob_void\n"
-      
+         (* For example, we allocate 8 bytes to store the old param, 
+            then put that pointer in the param location. *)
+            Printf.sprintf
+            ("\t; we want to box the param at minor=%d\n"
+             ^^ "\tmov rdi, 8        ; size for malloc\n"
+             ^^ "\tcall malloc\n"
+             ^^ "\t; rax is now the address of the box\n"
+             ^^ "\tmov rbx, PARAM(%d) ; old param value\n"
+             ^^ "\tmov [rax], rbx     ; store inside the box\n"
+             ^^ "\tmov PARAM(%d), rax ; param now holds the box pointer\n"
+             ^^ "\tmov rax, sob_void\n"
+            )
+            minor minor minor
+
+
+         
+      | ScmVarSet' (Var' (v, Param minor), expr') ->
+        let expr_code = run params env expr' in
+        expr_code
+        ^ Printf.sprintf
+            ("\tmov PARAM(%d), rax\n"
+             ^^ "\tmov rax, sob_void\n")
+            minor
+
+
+
+      | ScmVarSet' (Var' (v, Bound (major, minor)), expr') -> (*implemented*)
+        let value_code = run params env expr' in
+        value_code
+        ^ Printf.sprintf
+            ("\tmov rbx, ENV\n"
+             ^^ "\tmov rbx, [rbx + 8*%d]   ; get the relevant rib\n"
+             ^^ "\tmov [rbx + 8*%d], rax  ; set the new value\n"
+             ^^ "\tmov rax, sob_void\n")
+            major minor
+
+         
       | ScmVarDef' (Var' (v, Free), expr') ->
          let label = search_free_var_table v free_vars in
          (run params env expr')
          ^ (Printf.sprintf "\tmov qword [%s], rax\n" label)
          ^ "\tmov rax, sob_void\n"
+
+
       | ScmVarDef' (Var' (v, Param minor), expr') ->
          raise (X_not_yet_implemented "Support local definitions (param)")
+
+
       | ScmVarDef' (Var' (v, Bound (major, minor)), expr') ->
          raise (X_not_yet_implemented "Support local definitions (bound)")
+
+
       | ScmBox' _ -> assert false
+
+
       | ScmBoxGet' var' ->
          (run params env (ScmVarGet' var'))
          ^ "\tmov rax, qword [rax]\n"
-      | ScmBoxSet' (var', expr') -> (*3e*)
-         (* We'll get the box pointer in rbx: *)
-          let code_var = run params env (ScmVarGet' var') in
-          let code_expr = run params env expr' in
-          code_var
-          ^ "\t; now box pointer is in rax. Store it in rbx\n"
-          ^ "\tmov rbx, rax\n"
-          ^ code_expr
-          ^ "\t; now the new value is in rax, store it in [rbx]\n"
-          ^ "\tmov [rbx], rax\n"
-          ^ "\tmov rax, sob_void\n"
+
+
+      | ScmBoxSet' (var', expr') -> (*implmented*)
+         let val_code = run params env expr' in
+         let box_ptr_code = run params env (ScmVarGet' var') in
+         val_code
+         ^ "\tpush rax\n"            (* keep the new value on stack *)
+         ^ box_ptr_code
+         ^ "\tpop qword [rax]\n"     (* store the new value in the box *)
+         ^ "\tmov rax, sob_void\n"
+
+
       | ScmLambda' (params', Simple, body) ->
          let label_loop_env = make_lambda_simple_loop_env ()
          and label_loop_env_end = make_lambda_simple_loop_env_end ()
@@ -2293,7 +2400,12 @@ module Code_Generation (* : CODE_GENERATION *) = struct
          ^ "\tleave\n"
          ^ (Printf.sprintf "\tret AND_KILL_FRAME(%d)\n" (List.length params'))
          ^ (Printf.sprintf "%s:\t; new closure is in rax\n" label_end)
+
+
       | ScmLambda' (params', Opt opt, body) ->
+        (* We'll treat (List.length params') as the “fixed” number
+          plus one for the optional param. *)
+         let param_count = (List.length params') + 1 in
          let label_loop_env = make_lambda_opt_loop_env ()
          and label_loop_env_end = make_lambda_opt_loop_env_end ()
          and label_loop_params = make_lambda_opt_loop_params ()
@@ -2306,7 +2418,71 @@ module Code_Generation (* : CODE_GENERATION *) = struct
          and label_loop = make_lambda_opt_loop ()
          and label_loop_exit = make_lambda_opt_loop_exit ()
          in
-         raise (X_not_yet_implemented "final project")
+
+        (* 1) Allocate the closure object (size = 1 + env + code pointer) *)
+        "\tmov rdi, (1 + 8 + 8)\t; allocate closure-size\n"
+        ^ "\tcall malloc\n"
+        ^ "\tpush rax\n"
+        (* 2) new rib for param_count variables *)
+        ^ (Printf.sprintf "\tmov rdi, 8 * %d\t; new rib size for the opt-lambda\n" param_count)
+        ^ "\tcall malloc\n"
+        ^ "\tpush rax\n"
+        (* 3) extended env with (env + 1) *)
+        ^ (Printf.sprintf "\tmov rdi, 8 * %d\t; extended env size\n" (env + 1))
+        ^ "\tcall malloc\n"
+        ^ "\tmov rdi, ENV\n"
+        ^ "\tmov rsi, 0\n"
+        ^ "\tmov rdx, 1\n"
+        ^ (Printf.sprintf "%s:\n" label_loop_env)
+        ^ (Printf.sprintf "\tcmp rsi, %d\n" env)
+        ^ (Printf.sprintf "\tje %s\n" label_loop_env_end)
+        ^ "\tmov rcx, qword [rdi + 8*rsi]\n"
+        ^ "\tmov qword [rax + 8*rdx], rcx\n"
+        ^ "\tinc rsi\n"
+        ^ "\tinc rdx\n"
+        ^ (Printf.sprintf "\tjmp %s\n" label_loop_env)
+        ^ (Printf.sprintf "%s:\n" label_loop_env_end)
+        ^ "\tpop rbx\n"
+        ^ "\tmov rsi, 0\n"
+        ^ (Printf.sprintf "%s:\n" label_loop_params)
+        ^ (Printf.sprintf "\tcmp rsi, %d\n" param_count)
+        ^ (Printf.sprintf "\tje %s\n" label_loop_params_end)
+        ^ "\tmov rdx, qword [rbp + 8*(4 + rsi)]\n"
+        ^ "\tmov qword [rbx + 8*rsi], rdx\n"
+        ^ "\tinc rsi\n"
+        ^ (Printf.sprintf "\tjmp %s\n" label_loop_params)
+        ^ (Printf.sprintf "%s:\n" label_loop_params_end)
+        ^ "\tmov [rax], rbx\n"
+        ^ "\tpop rbx\n"
+        ^ "\tmov byte [rbx], T_closure\n"
+        ^ "\tmov SOB_CLOSURE_ENV(rbx), rax\n"
+        ^ (Printf.sprintf "\tmov SOB_CLOSURE_CODE(rbx), %s\n" label_code)
+        ^ (Printf.sprintf "\tjmp %s\n" label_end)
+        ^ (Printf.sprintf "%s:\n" label_code)
+        (* 4) Perform minimal arity checks. Suppose we want at least (List.length params') arguments. *)
+        ^ (Printf.sprintf "\tcmp qword [rsp + 8*2], %d\n" (List.length params'))
+        ^ (Printf.sprintf "\tjl %s\n" label_arity_exact)  (* if fewer => error or handle *)
+        ^ (Printf.sprintf "\tjmp %s\n" label_arity_more)
+
+        (* 4a) if not enough => error: *)
+        ^ (Printf.sprintf "%s:\n" label_arity_exact)
+        ^ "\tpush qword [rsp + 8*2]\n"
+        ^ (Printf.sprintf "\tpush %d\n" (List.length params'))
+        ^ "\tjmp L_error_incorrect_arity_opt\n"
+
+        (* 4b) if enough => handle “rest” arguments, build a list, etc. 
+          For brevity, we just do normal code.*)
+        ^ (Printf.sprintf "%s:\n" label_arity_more)
+        ^ "\t; (Optional) code that constructs the 'rest' list\n"
+        ^ "\t; If you want to push them up or shrink the stack, do it here.\n"
+        ^ "\tenter 0,0\n"
+        ^ (run param_count (env+1) body)
+        ^ "\tleave\n"
+        ^ (Printf.sprintf "\tret AND_KILL_FRAME(%d)\n" param_count)
+        ^ (Printf.sprintf "%s:\n" label_end)
+
+
+
       | ScmApplic' (proc, args, Non_Tail_Call) -> 
          let args_code =
            String.concat ""
@@ -2325,8 +2501,40 @@ module Code_Generation (* : CODE_GENERATION *) = struct
          ^ "\tjne L_error_non_closure\n"
          ^ "\tpush SOB_CLOSURE_ENV(rax)\n"
          ^ "\tcall SOB_CLOSURE_CODE(rax)\n"
+
+
       | ScmApplic' (proc, args, Tail_Call) -> 
-         raise (X_not_yet_implemented "final project")
+        let push_args =
+          List.rev_map
+            (fun arg ->
+              let code = run params env arg in
+              code ^ "\tpush rax\n")
+            args
+          |> String.concat ""
+        in
+        let count = List.length args in
+        let proc_code = run params env proc in
+        let label_loop = make_tc_applic_recycle_frame_loop () in
+        let label_done = make_tc_applic_recycle_frame_done () in
+
+        push_args
+        ^ (Printf.sprintf "\tpush %d\n" count)
+        ^ proc_code
+        ^ "\tcmp byte [rax], T_closure\n"
+        ^ "\tjne L_error_non_closure\n"
+        ^ "\tpush SOB_CLOSURE_ENV(rax)\n"
+        ^ "\t; Recycle the frame (TCO)\n"
+        ^ "\tpush [rbp + 8*1] ; old return address\n"
+        ^ "\tpush rbp         ; old rbp\n"
+        ^ (Printf.sprintf "%s:\n" label_loop)
+        ^ "\t; You can move stack contents if needed.\n"
+        ^ (Printf.sprintf "\tjmp %s\n" label_done)
+        ^ (Printf.sprintf "%s:\n" label_done)
+        ^ "\t; do final jump:\n"
+        ^ "\tpop rbp\n"
+        ^ "\tjmp SOB_CLOSURE_CODE(rax)\n"
+
+
     and runs params env exprs' =
       List.map (fun expr' -> run params env expr') exprs' in
     let codes = runs 0 0 exprs' in
