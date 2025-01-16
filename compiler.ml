@@ -1831,68 +1831,91 @@ module Code_Generation (* : CODE_GENERATION *) = struct
       ("return", "L_code_ptr_return");
     ];;  
 
-let collect_constants =
-  let rec run = function
-
-    (* 1) For a free variable-get "x", collect both (ScmString "x") and (ScmSymbol "x"): *)
-    | ScmVarGet' (Var'(v, Free)) ->
-        [ScmString v; ScmSymbol v]
-
-    (* 2) For a free box/bound references, do the same: *)
-    | ScmBox'(Var'(v, Free)) ->
-        [ScmString v; ScmSymbol v]
-
-    | ScmBoxGet'(Var'(v, Free)) ->
-        [ScmString v; ScmSymbol v]
-
-    (* If it's a free box-set, also gather subconstants from the RHS: *)
-    | ScmBoxSet'(Var'(v, Free), rhs) ->
-        (ScmString v :: ScmSymbol v :: run rhs)
-
-    (* 3) If it’s a free VarDef or VarSet, collect (ScmString v; ScmSymbol v) plus recurse on expr: *)
-    | ScmVarDef'(Var'(v, Free), expr')
-    | ScmVarSet'(Var'(v, Free), expr') ->
-        (ScmString v :: ScmSymbol v :: (run expr'))
-
-    (* 4) For a VarGet' that isn't free, or a Box that isn't free, etc. => do nothing special: *)
-    | ScmVarGet' _       
-    | ScmBox' _
-    | ScmBoxGet' _ ->
-        []
-
-    (* 5) If it's a constant => collect that constant directly: *)
-    | ScmConst'(sexpr) ->
-        [sexpr]
-
-    (* 6) Recursively gather from sub-expressions in If, Seq, Or, Lambda, etc.: *)
-    | ScmIf'(test, dit, dif) ->
-        (run test) @ (run dit) @ (run dif)
-
-    | ScmSeq'(exprs') ->
-        runs exprs'
-
-    | ScmOr'(exprs') ->
-        runs exprs'
-
-    | ScmVarDef' (_, expr')
-    | ScmVarSet' (_, expr')
-    | ScmBoxSet' (_, expr')
-    | ScmLambda' (_, _, expr') ->
-        run expr'
-
-    | ScmApplic'(proc, args, _) ->
-        (run proc) @ (runs args)
-
-  (* helper that runs `run` over a list of expressions: *)
-  and runs exprs' =
-    List.fold_left (fun acc expr' -> acc @ (run expr')) [] exprs'
-
-  in fun exprs' ->
-  (* add all global primitive names as strings, e.g. "null?", "pair?", etc. *)
-  (List.map (fun (scm_name, _) -> ScmString scm_name) global_bindings_table)
-  (* then fold in everything `run` collects from the program: *)
-  @ (runs exprs')
-;;
+    let collect_constants =
+      (* Extend built_ins with cons, list, etc. 
+         so that we do NOT collect ScmSymbol "cons" or ScmSymbol "list". 
+         Instead, we only collect ScmString "cons", ScmString "list". *)
+      let built_ins = ["+"; "-"; "*"; "/"; "cons"; "list"] in
+    
+      let rec run = function
+    
+        (* 1) If the free var is in built_ins => collect only ScmString name *)
+        | ScmVarGet'(Var'(name, Free)) when List.mem name built_ins ->
+            [ScmString name]
+    
+        (* Otherwise, for free vars: [ScmString name; ScmSymbol name]. *)
+        | ScmVarGet'(Var'(name, Free)) ->
+            [ScmString name; ScmSymbol name]
+    
+        (* 2) Box or BoxGet with a free var => similar logic. 
+           If built_in => only string, else both. *)
+        | ScmBox'(Var'(v, Free)) when List.mem v built_ins ->
+            [ScmString v]
+        | ScmBox'(Var'(v, Free)) ->
+            [ScmString v; ScmSymbol v]
+    
+        | ScmBoxGet'(Var'(v, Free)) when List.mem v built_ins ->
+            [ScmString v]
+        | ScmBoxGet'(Var'(v, Free)) ->
+            [ScmString v; ScmSymbol v]
+    
+        (* 3) If it's a free BoxSet => similarly: 
+           built-in => only string; else => string & symbol + sub-expr. *)
+        | ScmBoxSet'(Var'(v, Free), rhs) when List.mem v built_ins ->
+            (ScmString v) :: (run rhs)
+        | ScmBoxSet'(Var'(v, Free), rhs) ->
+            (ScmString v :: ScmSymbol v :: run rhs)
+    
+        (* 4) Free VarDef/VarSet => collect var + run expr. *)
+        | ScmVarDef'(Var'(v, Free), expr') when List.mem v built_ins ->
+            ScmString v :: run expr'
+        | ScmVarDef'(Var'(v, Free), expr') ->
+            ScmString v :: ScmSymbol v :: run expr'
+    
+        | ScmVarSet'(Var'(v, Free), expr') when List.mem v built_ins ->
+            ScmString v :: run expr'
+        | ScmVarSet'(Var'(v, Free), expr') ->
+            ScmString v :: ScmSymbol v :: run expr'
+    
+        (* 5) VarGet'/Box stuff that is not free => do nothing special: *)
+        | ScmVarGet' _
+        | ScmBox' _
+        | ScmBoxGet' _ ->
+            []
+    
+        (* 6) A direct constant => collect it as is: *)
+        | ScmConst'(sexpr) ->
+            [sexpr]
+    
+        (* 7) Recursively gather from subexpressions in If, Seq, Or, etc. *)
+        | ScmIf'(test, dit, dif) ->
+            run test @ run dit @ run dif
+    
+        | ScmSeq'(exprs') ->
+            runs exprs'
+    
+        | ScmOr'(exprs') ->
+            runs exprs'
+    
+        | ScmVarDef' (_, expr')
+        | ScmVarSet' (_, expr')
+        | ScmBoxSet' (_, expr')
+        | ScmLambda' (_, _, expr') ->
+            run expr'
+    
+        | ScmApplic'(proc, args, _) ->
+            run proc @ runs args
+    
+        (* Fallback case => do nothing. *)
+        | _ -> []
+    
+      and runs exprs' =
+        List.fold_left (fun acc expr' -> acc @ run expr') [] exprs'
+      in fun exprs' ->
+        List.map (fun (scm_name, _) -> ScmString scm_name) global_bindings_table
+        @ runs exprs'
+    
+    
 
   let add_sub_constants =
     let rec run sexpr = match sexpr with
@@ -2578,7 +2601,7 @@ let collect_constants =
     ( string_to_file (Printf.sprintf "%s.asm" file_out_base) asm_code;
       match (Sys.command
                (Printf.sprintf
-                  "make -f testing/makefile %s" file_out_base)) with
+                  "make -f makefile %s" file_out_base)) with
       | 0 -> let _ = Sys.command (Printf.sprintf "./%s" file_out_base) in ()
       | n -> (Printf.printf "!!! Failed with code %d\n" n; ()));;
 
@@ -2586,5 +2609,4 @@ end;; (* end of Code_Generation struct *)
 
 (* end-of-input *)
 
-let test = Code_Generation.compile_and_run_scheme_string "testing/goo";;
-
+let test = Code_Generation.compile_and_run_scheme_string "goo";;
