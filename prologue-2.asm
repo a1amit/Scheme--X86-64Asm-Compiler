@@ -5,7 +5,3 @@ global main
 section .text
 main:
         enter 0, 0
-        push 0
-        push 0
-        push Lend
-        enter 0, 0

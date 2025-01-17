@@ -883,55 +883,70 @@ L_code_ptr_lognot:
         ret AND_KILL_FRAME(1)
 
 L_code_ptr_bin_apply:
-;;; fill in for final project!
-        enter 0, 0
-        ; Example: assume we have exactly 2 arguments:
-        ; param(0) = closure, param(1) = a list of arguments
-        cmp COUNT, 2
+        ;; fill in for final project
+        ;; Expect exactly two arguments
+        cmp qword [rsp + 8 * 2], 2
         jne L_error_arg_count_2
 
-        mov rax, PARAM(0)
-        cmp byte [rax], T_closure
-        jne L_error_non_closure
+        ;; Load the second argument, which must be a closure
+        mov r12, qword [rsp + 8 * 3]
+        assert_closure(r12)
 
-        mov rbx, PARAM(1)    ; the list
-        xor rcx, rcx         ; rcx will hold length
-.check_list:
-        cmp byte [rbx], T_nil
-        je .found_length
-        cmp byte [rbx], T_pair
-        jne L_error_improper_list
+        ;; r10 points to the portion of the stack that holds the list
+        lea r10, [rsp + 8 * 4]
+        mov r11, qword [r10]
+        mov r9, qword [rsp]
+
+        ;; Count how many elements are in the list
+        mov rcx, 0
+        mov rsi, r11
+.count_loop:
+        cmp rsi, sob_nil
+        je .count_done
+        assert_pair(rsi)
         inc rcx
-        mov rbx, qword [rbx + 1 + 8] ; cdr
-        jmp .check_list
+        mov rsi, SOB_PAIR_CDR(rsi)
+        jmp .count_loop
 
-.found_length:
-        ; now push them in reverse:
-        mov rbx, PARAM(1)
-.push_args_loop:
+.count_done:
+        ;; Allocate space on the stack for the new frame, minus the first 2 items
+        lea rbx, [8 * (rcx - 2)]
+        sub rsp, rbx
+
+        ;; Prepare to store the new frame at [rsp]
+        mov rdi, rsp
+        cld
+
+        ;; 1) Place the old return address
+        mov rax, r9
+        stosq
+
+        ;; 2) Place the closure's environment
+        mov rax, SOB_CLOSURE_ENV(r12)
+        stosq
+
+        ;; 3) Place the argument count
+        mov rax, rcx
+        stosq
+
+.args_loop:
         cmp rcx, 0
-        je .push_args_done
-        mov rdi, qword [rbx + 1]    ; car
-        push rdi
-        mov rbx, qword [rbx + 1 + 8]
+        je .args_done
+        mov rax, SOB_PAIR_CAR(r11)
+        stosq
+        mov r11, SOB_PAIR_CDR(r11)
         dec rcx
-        jmp .push_args_loop
-.push_args_done:
+        jmp .args_loop
 
-        ; total new arg count = (old COUNT - 2) + length
-        mov rdi, COUNT
-        sub rdi, 2
-        add rdi, rcx   ; but rcx is 0 now, so store length earlier or do it differently
-        ; for example, we can keep it in a local var. Here let's assume it's all good.
+.args_done:
+        ;; Minor pointer adjustment check
+        sub rdi, 8
+        cmp r10, rdi
+        jne .stack_corrupt
+        jmp SOB_CLOSURE_CODE(r12)
 
-        ; push the new COUNT:
-        push rdi
-
-        ; push env
-        push SOB_CLOSURE_ENV(rax)
-
-        ; jump to code
-        jmp SOB_CLOSURE_CODE(rax)
+.stack_corrupt:
+        int3
 
 L_code_ptr_is_null:
         enter 0, 0
